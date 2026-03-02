@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;overflow:hidden">
+<script>
+  var DWELL_MS     = 1500;
+  var dwellTimer   = null;
+  var dwellCluster = null;
+
+  function clearDwell() {
+    if (dwellTimer !== null) { clearTimeout(dwellTimer); dwellTimer = null; }
+    dwellCluster = null;
+  }
+
+  function triggerExpand(cid) {
+    var vibeLabel = 'Vibe ' + (cid + 1) + ' (';
+    var containers = window.parent.document.querySelectorAll('[data-testid="stCheckbox"]');
+    for (var i = 0; i < containers.length; i++) {
+      var text = containers[i].textContent.trim();
+      if (text.indexOf(vibeLabel) !== 0) continue;
+      var input = containers[i].querySelector('input[type="checkbox"]');
+      if (input && !input.checked) {
+        input.click();
+        console.log('[hover3d] expanded Vibe ' + (cid + 1));
+      } else {
+        console.log('[hover3d] Vibe ' + (cid + 1) + (input ? ' already checked' : ' input not found'));
+      }
+      return;
+    }
+    console.log('[hover3d] Vibe ' + (cid + 1) + ' not found (' + containers.length + ' checkboxes)');
+  }
+
+  function onHover(eventData) {
+    if (!eventData || !eventData.points || !eventData.points.length) return;
+    var cd = eventData.points[0].customdata;
+    if (!cd || cd.type !== 'cluster') { clearDwell(); return; }
+    var cid = cd.cluster_id;
+    if (cid === dwellCluster) return;   // jitter on same cluster — keep timer running
+    clearDwell();
+    dwellCluster = cid;
+    dwellTimer = setTimeout(function () {
+      dwellTimer = null; dwellCluster = null;
+      console.log('[hover3d] dwell FIRED, cluster_id=', cid);
+      triggerExpand(cid);
+    }, DWELL_MS);
+    console.log('[hover3d] dwell started, cluster_id=', cid);
+  }
+
+  function onUnhover() { clearDwell(); }
+
+  // Poll every 500 ms: re-attach whenever Streamlit recreates the Plotly div
+  var attachedDiv = null;
+  function checkAttach() {
+    try {
+      var plotDiv = window.parent.document.querySelector('.js-plotly-plot');
+      if (!plotDiv || typeof plotDiv.on !== 'function') {
+        attachedDiv = null;   // chart gone — reset so we re-attach when it returns
+        return;
+      }
+      if (plotDiv === attachedDiv) return;   // already listening on this div
+      attachedDiv = plotDiv;
+      plotDiv.on('plotly_hover',   onHover);
+      plotDiv.on('plotly_unhover', onUnhover);
+      console.log('[hover3d] (re)attached to chart');
+    } catch(e) { console.error('[hover3d] attach error:', e); }
+  }
+  setInterval(checkAttach, 500);
+</script>
+</body>
+</html>

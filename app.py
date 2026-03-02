@@ -1,10 +1,17 @@
+import os
 import textwrap
 from collections import Counter
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from sklearn.cluster import KMeans
+
+# ── Custom component: Plotly 3D hover-dwell listener ─────────────────────────
+_COMPONENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "components", "plotly_3d_hover")
+_HOVER_HTML    = open(os.path.join(_COMPONENT_DIR, "index.html"), encoding="utf-8").read()
 
 # --- 1. DATA LOADING ---
 _ARTIST_RENAME = {
@@ -307,6 +314,46 @@ if searched_artist and searched_artist != "None":
 # Sidebar: interactive cluster expansion checkboxes
 _cluster_data = st.session_state['cluster_cache'].get(cache_key, {})
 _cluster_members = _cluster_data.get('cluster_members', {})
+
+# ── Exclusive expand + auto-populate — BEFORE widgets render ──────────────────
+# Read raw checkbox states from session state (set by last user interaction),
+# then mutate them before st.checkbox calls so Streamlit never complains.
+_prev_expanded = st.session_state.get('expanded_cluster_ids', set())
+_raw_expanded  = {
+    _cid for _cid in range(n_clusters)
+    if st.session_state.get(f"cluster_cb_{_cid}_{cache_key}", False)
+}
+_new_clusters = _raw_expanded - _prev_expanded
+
+if _new_clusters:
+    _newly = min(_new_clusters)
+
+    # Collapse all other clusters before checkboxes render
+    for _cid in range(n_clusters):
+        st.session_state[f"cluster_cb_{_cid}_{cache_key}"] = (_cid == _newly)
+
+    # Auto-populate compare slots (skip for search-triggered expansions so the
+    # searched artist stays in slot 0)
+    _skip_populate = (searched_cluster_id is not None and _newly == searched_cluster_id)
+    if not _skip_populate:
+        _cdata           = _cluster_members.get(_newly, {})
+        _centroid_artist = _cdata.get('centroid_artist')
+        _cluster_artists = _cdata.get('artists', [])
+        if _centroid_artist and _centroid_artist in df['Artist'].values:
+            _cent_vec = np.array(
+                [df[df['Artist'] == _centroid_artist].iloc[0][d] for d in DIMENSIONS],
+                dtype=float
+            )
+            _dists = []
+            for _a in _cluster_artists:
+                if _a == _centroid_artist or _a not in df['Artist'].values:
+                    continue
+                _v = np.array([df[df['Artist'] == _a].iloc[0][d] for d in DIMENSIONS], dtype=float)
+                _dists.append((float(np.linalg.norm(_v - _cent_vec)), _a))
+            _dists.sort(reverse=True)
+            _top2 = [x[1] for x in _dists[:2]]
+            st.session_state['compare_artists'] = ([_centroid_artist] + _top2 + [None, None])[:3]
+
 expanded_ids = set()
 with st.sidebar:
     st.markdown("---")
@@ -324,6 +371,8 @@ with st.sidebar:
                 st.session_state[_cb_key] = True
         if st.checkbox(_label, key=_cb_key):
             expanded_ids.add(_cid)
+
+st.session_state['expanded_cluster_ids'] = expanded_ids
 
 if not f_df.empty:
     DIM_SHORT = [
@@ -419,7 +468,7 @@ if not f_df.empty:
             x=[centroid[0]], y=[centroid[1]], z=[centroid[2]],
             mode='markers+text' if show_labels and (is_expanded or is_searched) else 'markers',
             text=[f"Vibe {cluster_id+1}"] if show_labels and (is_expanded or is_searched) else [""],
-            customdata=[["cluster", cluster_id]],
+            customdata=[{"type": "cluster", "cluster_id": cluster_id}],
             marker=dict(
                 size=size,
                 symbol='diamond',
@@ -452,7 +501,7 @@ if not f_df.empty:
                     z=singles_df[axis_z],
                     mode='markers+text' if show_labels else 'markers',
                     text=singles_df['Artist'] if show_labels else "",
-                    customdata=[["artist", cluster_id, row["Artist"]] for _, row in singles_df.iterrows()],
+                    customdata=[{"type": "artist", "cluster_id": cluster_id} for _ in singles_df.iterrows()],
                     marker=dict(
                         size=8,
                         symbol='circle',
@@ -476,7 +525,7 @@ if not f_df.empty:
                     z=[group[axis_z].iloc[0]],
                     mode='markers+text' if show_labels else 'markers',
                     text=[collision_names] if show_labels else [""],
-                    customdata=[["collision", cluster_id]],
+                    customdata=[{"type": "collision", "cluster_id": cluster_id}],
                     marker=dict(
                         size=10,
                         symbol='diamond',
@@ -536,36 +585,12 @@ if not f_df.empty:
         margin=dict(l=0, r=0, b=0, t=0)
     )
 
-    event_data = st.plotly_chart(fig, key="scatter3d", on_select="rerun", width='stretch')
+    # Render the 3D chart natively (no flash, camera state preserved by Streamlit)
+    st.plotly_chart(fig, key="scatter3d", width='stretch')
 
-    # Handle chart click: expand vibes or populate compare slots
-    if event_data and event_data.selection and event_data.selection.points:
-        pt = event_data.selection.points[0]
-        cd = pt.get('customdata')
-        if isinstance(cd, list) and cd:
-            pt_type = cd[0]
-            if pt_type == 'cluster' and len(cd) >= 2:
-                cid = int(cd[1])
-                cb_key = f"cluster_cb_{cid}_{cache_key}"
-                is_already = st.session_state.get(cb_key, False)
-                # Collapse all vibes, then toggle the clicked one (exclusive expand)
-                for _i in range(n_clusters):
-                    st.session_state[f"cluster_cb_{_i}_{cache_key}"] = False
-                if not is_already:
-                    st.session_state[cb_key] = True
-                st.rerun()
-            elif pt_type == 'artist' and len(cd) >= 3:
-                artist_name = cd[2]
-                # Collapse all vibes
-                for _i in range(n_clusters):
-                    st.session_state[f"cluster_cb_{_i}_{cache_key}"] = False
-                # Populate first empty compare slot
-                if artist_name and artist_name not in st.session_state['compare_artists']:
-                    for i in range(3):
-                        if not st.session_state['compare_artists'][i]:
-                            st.session_state['compare_artists'][i] = artist_name
-                            break
-                st.rerun()
+    # Invisible zero-height iframe: attaches plotly_hover listeners and directly
+    # clicks the corresponding Vibe checkbox in the sidebar on a 1.5s dwell.
+    components.html(_HOVER_HTML, height=0)
 
     # ============================================================
     # DETAIL PANEL

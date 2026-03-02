@@ -76,7 +76,7 @@ VALUES
  4, 6, 5, 7,  8, 9, 5,  7, 7, 5),
 
 -- Dead Man's Chest (Matt Thomas) — Dark/Industrial DnB, UK, PRSPCT/Eatbrain/Metalheadz/Barcode, extreme producer
-('Dead Man\'s Chest',    'Drum & Bass + Jungle', ARRAY['Neurofunk', 'Crossbreed'],
+('Dead Man''s Chest',    'Drum & Bass + Jungle', ARRAY['Neurofunk', 'Crossbreed'],
  'UK producer Matt Thomas whose PRSPCT Recordings, Eatbrain, Metalheadz, and Barcode Recordings output delivers ferociously dark, industrial-influenced neurofunk at the extreme end of drum and bass production. Current Value and Homemade Weapons-adjacent sonic territory — abrasive sound design, maximum percussion complexity, and zero concession to accessibility; a pillar of the heavy European neurofunk underground whose releases regularly feature on Outbreak and PRSPCT label showcases.',
  9, 1, 9, 8,  5, 7, 9,  2, 7, 1),
 
