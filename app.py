@@ -57,7 +57,7 @@ GENRES = [
     "Bass + Dubstep", "Breakbeat", "Drum & Bass + Jungle", "ElectroPop + SynthPop",
     "Hard Dance", "House", "IDM", "Noise", "Synthwave + Vaporwave", "Techno", "Trance",
 ]
-COMPARE_COLORS = ['#00D4FF', '#FF4B4B', '#32CD32', '#FFB400']
+COMPARE_COLORS = ['#00C8FF', '#FF6B6B', '#FFD166']
 _PLACEHOLDER = "Select Artist"
 
 DIM_ABBREV = {
@@ -162,7 +162,7 @@ def _ensure_list(val):
 
 # --- 3. SESSION STATE ---
 if 'compare_artists' not in st.session_state:
-    st.session_state['compare_artists'] = [None, None, None, None]
+    st.session_state['compare_artists'] = [None, None, None]
 
 # Search and cluster expansion state
 if 'search_artist' not in st.session_state:
@@ -197,7 +197,7 @@ with st.sidebar:
         st.session_state['search_artist'] = search_input
         # Auto-populate first empty compare slot
         if search_input not in st.session_state['compare_artists']:
-            for i in range(4):
+            for i in range(3):
                 if not st.session_state['compare_artists'][i]:
                     st.session_state['compare_artists'][i] = search_input
                     break
@@ -214,8 +214,8 @@ with st.sidebar:
 
     # ========== CLUSTERING (ALWAYS ENABLED) ==========
     st.markdown("---")
-    st.subheader("Clustering")
-    n_clusters = st.radio("Number of Clusters", [25, 50], horizontal=True)
+    st.subheader("Vibes")
+    n_clusters = st.radio("Number of Vibes", [25, 50], horizontal=True)
     clustering_enabled = True
     cluster_strategy = "Aggregate"
 
@@ -310,8 +310,8 @@ _cluster_members = _cluster_data.get('cluster_members', {})
 expanded_ids = set()
 with st.sidebar:
     st.markdown("---")
-    st.subheader("Clusters")
-    st.caption(f"{len(f_df)} artists · {n_clusters} clusters · check to expand")
+    st.subheader("Vibes")
+    st.caption(f"{len(f_df)} artists · {n_clusters} vibes · click chart or check to expand")
     for _cid in range(n_clusters):
         _cb_key = f"cluster_cb_{_cid}_{cache_key}"
         _m = _cluster_members.get(_cid, {'artists': [], 'count': 0})
@@ -419,7 +419,7 @@ if not f_df.empty:
             x=[centroid[0]], y=[centroid[1]], z=[centroid[2]],
             mode='markers+text' if show_labels and (is_expanded or is_searched) else 'markers',
             text=[f"Vibe {cluster_id+1}"] if show_labels and (is_expanded or is_searched) else [""],
-            customdata=[{"type": "cluster", "cluster_id": cluster_id, "is_centroid": True}],
+            customdata=[["cluster", cluster_id]],
             marker=dict(
                 size=size,
                 symbol='diamond',
@@ -431,7 +431,7 @@ if not f_df.empty:
             textposition="top center",
             hovertemplate=[hover_centroid],
             showlegend=False,
-            name=f"Cluster {cluster_id + 1}"
+            name=f"Vibe {cluster_id + 1}"
         ))
 
         # ===== CLUSTER MEMBERS (only if expanded or searched) =====
@@ -452,7 +452,7 @@ if not f_df.empty:
                     z=singles_df[axis_z],
                     mode='markers+text' if show_labels else 'markers',
                     text=singles_df['Artist'] if show_labels else "",
-                    customdata=[{"type": "artist", "cluster_id": cluster_id} for _ in singles_df.iterrows()],
+                    customdata=[["artist", cluster_id, row["Artist"]] for _, row in singles_df.iterrows()],
                     marker=dict(
                         size=8,
                         symbol='circle',
@@ -476,7 +476,7 @@ if not f_df.empty:
                     z=[group[axis_z].iloc[0]],
                     mode='markers+text' if show_labels else 'markers',
                     text=[collision_names] if show_labels else [""],
-                    customdata=[{"type": "collision", "cluster_id": cluster_id}],
+                    customdata=[["collision", cluster_id]],
                     marker=dict(
                         size=10,
                         symbol='diamond',
@@ -536,7 +536,36 @@ if not f_df.empty:
         margin=dict(l=0, r=0, b=0, t=0)
     )
 
-    st.plotly_chart(fig, key="scatter3d", width='stretch')
+    event_data = st.plotly_chart(fig, key="scatter3d", on_select="rerun", width='stretch')
+
+    # Handle chart click: expand vibes or populate compare slots
+    if event_data and event_data.selection and event_data.selection.points:
+        pt = event_data.selection.points[0]
+        cd = pt.get('customdata')
+        if isinstance(cd, list) and cd:
+            pt_type = cd[0]
+            if pt_type == 'cluster' and len(cd) >= 2:
+                cid = int(cd[1])
+                cb_key = f"cluster_cb_{cid}_{cache_key}"
+                is_already = st.session_state.get(cb_key, False)
+                # Collapse all vibes, then toggle the clicked one (exclusive expand)
+                for _i in range(n_clusters):
+                    st.session_state[f"cluster_cb_{_i}_{cache_key}"] = False
+                if not is_already:
+                    st.session_state[cb_key] = True
+                st.rerun()
+            elif pt_type == 'artist' and len(cd) >= 3:
+                artist_name = cd[2]
+                # Collapse all vibes
+                for _i in range(n_clusters):
+                    st.session_state[f"cluster_cb_{_i}_{cache_key}"] = False
+                # Populate first empty compare slot
+                if artist_name and artist_name not in st.session_state['compare_artists']:
+                    for i in range(3):
+                        if not st.session_state['compare_artists'][i]:
+                            st.session_state['compare_artists'][i] = artist_name
+                            break
+                st.rerun()
 
     # ============================================================
     # DETAIL PANEL
@@ -564,11 +593,11 @@ if not f_df.empty:
     with _hc2:
         if any(st.session_state['compare_artists']):
             if st.button("Clear all", use_container_width=True):
-                st.session_state['compare_artists'] = [None, None, None, None]
+                st.session_state['compare_artists'] = [None, None, None]
                 st.rerun()
 
-    # 4 compare slots
-    slot_cols = st.columns(4)
+    # 3 compare slots
+    slot_cols = st.columns(3)
     for i, col in enumerate(slot_cols):
         with col:
             current = st.session_state['compare_artists'][i] or _PLACEHOLDER
