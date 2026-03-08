@@ -1,7 +1,32 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:drumandbassuk.com)"
+      "WebFetch(domain:drumandbassuk.com)",
+      "WebFetch(domain:www.reddit.com)",
+      "Bash(python:*)",
+      "Bash(where gh:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.streamlit.io)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:plotly.com)",
+      "WebFetch(domain:discuss.streamlit.io)",
+      "Bash(python3:*)",
+      "Bash(ls:*)",
+      "Bash(grep -h \"^\\(''\" \"C:/AiProjects/PolyJamerous/supabase/seed_artists_batch\"*.sql)",
+      "Bash(sed:*)",
+      "Bash(comm:*)",
+      "Bash(grep:*)",
+      "Bash(\"c:\\\\AiProjects\\\\PolyJamerous\\\\supabase\\\\seed_artists_batches_34_35.sql\")",
+      "Bash(psql:*)",
+      "Bash(pip install:*)",
+      "Bash(streamlit run:*)",
+      "Bash(where python:*)",
+      "Bash(C:/Users/idolg/AppData/Local/Python/bin/python.exe:*)",
+      "Bash(C:/Users/idolg/AppData/Local/Python/pythoncore-3.14-64/Scripts/streamlit.exe run:*)",
+      "Bash(C:/Users/idolg/AppData/Local/Python/pythoncore-3.14-64/python.exe:*)",
+      "Bash(C:UsersidolgAppDataLocalPythonpythoncore-3.14-64python.exe:*)",
+      "Bash(\"/c/Users/idolg/AppData/Local/Python/pythoncore-3.14-64/python.exe\":*)"
     ]
   }
 }

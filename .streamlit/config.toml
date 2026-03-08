@@ -1,0 +1,4 @@
+[server]
+# Python 3.14 + watchdog incompatibility on Windows causes a fatal semaphore
+# crash when the browser tab closes.  Polling watcher avoids the issue.
+fileWatcherType = "poll"

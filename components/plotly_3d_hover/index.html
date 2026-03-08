@@ -6,6 +6,102 @@
   var dwellTimer   = null;
   var dwellCluster = null;
 
+  // ── Camera preservation ──────────────────────────────────────────────────────
+  // savedCamera is kept both in local scope AND in window.parent so it survives
+  // iframe recreation (Streamlit may recreate the iframe on each rerun).
+  var isRestoring  = false;
+  var attachedDiv  = null;
+
+  function isValidCamera(cam) {
+    if (!cam || !cam.eye || !cam.center || !cam.up) return false;
+    var e = cam.eye;
+    return (typeof e.x === 'number' && isFinite(e.x) &&
+            typeof e.y === 'number' && isFinite(e.y) &&
+            typeof e.z === 'number' && isFinite(e.z));
+  }
+
+  // Read persisted camera from parent window (survives iframe recreation).
+  function loadCamera() {
+    try { var c = window.parent.__pj_camera; return isValidCamera(c) ? c : null; } catch(e) { return null; }
+  }
+  function saveCamera(cam) {
+    try { window.parent.__pj_camera = cam; } catch(e) {}
+  }
+  var savedCamera = loadCamera();  // recover on init if iframe was recreated
+
+  function getCamera() {
+    try {
+      var fl = attachedDiv && attachedDiv._fullLayout;
+      if (!fl || !fl.scene || !fl.scene.camera) return null;
+      var cam = JSON.parse(JSON.stringify(fl.scene.camera));
+      return isValidCamera(cam) ? cam : null;
+    } catch(e) { return null; }
+  }
+
+  function camerasMoved(a, b) {
+    if (!isValidCamera(a) || !isValidCamera(b)) return false;
+    return Math.abs(a.eye.x - b.eye.x) +
+           Math.abs(a.eye.y - b.eye.y) +
+           Math.abs(a.eye.z - b.eye.z) > 0.001;
+  }
+
+  function findPlotly() {
+    try { if (window.parent.Plotly) return window.parent.Plotly; } catch(e) {}
+    try {
+      var iframes = window.parent.document.querySelectorAll('iframe');
+      for (var i = 0; i < iframes.length; i++) {
+        try { var w = iframes[i].contentWindow; if (w && w.Plotly) return w.Plotly; } catch(e) {}
+      }
+    } catch(e) {}
+    return null;
+  }
+
+  function hideChart(div) {
+    if (!div) return;
+    div.style.transition = 'none';
+    div.style.opacity    = '0';
+  }
+
+  function showChart(div) {
+    if (!div) return;
+    div.style.transition = 'opacity 0.15s ease-in';
+    div.style.opacity    = '1';
+    setTimeout(function() {
+      if (div.style.opacity === '1') { div.style.transition = ''; div.style.opacity = ''; }
+    }, 200);
+  }
+
+  function onAfterPlot() {
+    if (isRestoring) return;
+    isRestoring = true;
+    var div = attachedDiv;
+    // Always hide immediately so the mid-draw state is never visible.
+    hideChart(div);
+
+    setTimeout(function() {
+      if (!div) { showChart(div); isRestoring = false; return; }
+
+      var current = getCamera();
+      // Restore if: we have a saved camera AND (plotly hasn't set one yet OR it moved).
+      var needsRestore = isValidCamera(savedCamera) && (!current || camerasMoved(savedCamera, current));
+      if (needsRestore) {
+        var P = findPlotly();
+        if (P) {
+          try { P.relayout(div, { 'scene.camera': savedCamera }); }
+          catch(e) { console.warn('[hover3d] relayout threw:', e); }
+        } else {
+          console.warn('[hover3d] Plotly not found');
+        }
+        setTimeout(function() { showChart(div); isRestoring = false; }, 220);
+      } else {
+        // Camera is already correct — just fade in.
+        showChart(div);
+        isRestoring = false;
+      }
+    }, 250);
+  }
+
+  // ── Hover / dwell ─────────────────────────────────────────────────────────────
   function clearDwell() {
     if (dwellTimer !== null) { clearTimeout(dwellTimer); dwellTimer = null; }
     dwellCluster = null;
@@ -34,34 +130,60 @@
     var cd = eventData.points[0].customdata;
     if (!cd || cd.type !== 'cluster') { clearDwell(); return; }
     var cid = cd.cluster_id;
-    if (cid === dwellCluster) return;   // jitter on same cluster — keep timer running
+    if (cid === dwellCluster) return;
     clearDwell();
     dwellCluster = cid;
-    dwellTimer = setTimeout(function () {
+    dwellTimer = setTimeout(function() {
       dwellTimer = null; dwellCluster = null;
-      console.log('[hover3d] dwell FIRED, cluster_id=', cid);
       triggerExpand(cid);
     }, DWELL_MS);
-    console.log('[hover3d] dwell started, cluster_id=', cid);
   }
 
   function onUnhover() { clearDwell(); }
 
-  // Poll every 500 ms: re-attach whenever Streamlit recreates the Plotly div
-  var attachedDiv = null;
+  // ── Attach to a (new) plot div ────────────────────────────────────────────────
+  function attachToDiv(plotDiv) {
+    attachedDiv = plotDiv;
+    plotDiv.on('plotly_hover',     onHover);
+    plotDiv.on('plotly_unhover',   onUnhover);
+    plotDiv.on('plotly_afterplot', onAfterPlot);
+    if (isValidCamera(savedCamera) && !isRestoring) {
+      isRestoring = true;
+      hideChart(plotDiv);
+      setTimeout(function() {
+        var P = findPlotly();
+        if (P) { try { P.relayout(plotDiv, { 'scene.camera': savedCamera }); } catch(e) {} }
+        setTimeout(function() { showChart(plotDiv); isRestoring = false; }, 220);
+      }, 250);
+    }
+    console.log('[hover3d] attached; Plotly available:', !!(findPlotly()));
+  }
+
+  // ── MutationObserver: immediate detection when chart div is replaced ──────────
+  try {
+    var mo = new MutationObserver(function() {
+      try {
+        var plotDiv = window.parent.document.querySelector('.js-plotly-plot');
+        if (plotDiv && plotDiv !== attachedDiv) {
+          console.log('[hover3d] MutationObserver: new chart div');
+          attachToDiv(plotDiv);
+        }
+      } catch(e) {}
+    });
+    mo.observe(window.parent.document.body, { childList: true, subtree: true });
+  } catch(e) { console.warn('[hover3d] MutationObserver unavailable:', e); }
+
+  // ── Polling: camera snapshot + fallback div detection ────────────────────────
   function checkAttach() {
     try {
       var plotDiv = window.parent.document.querySelector('.js-plotly-plot');
-      if (!plotDiv || typeof plotDiv.on !== 'function') {
-        attachedDiv = null;   // chart gone — reset so we re-attach when it returns
+      if (!plotDiv || typeof plotDiv.on !== 'function') { attachedDiv = null; return; }
+      if (plotDiv === attachedDiv) {
+        if (!isRestoring) { var cam = getCamera(); if (cam) { savedCamera = cam; saveCamera(cam); } }
         return;
       }
-      if (plotDiv === attachedDiv) return;   // already listening on this div
-      attachedDiv = plotDiv;
-      plotDiv.on('plotly_hover',   onHover);
-      plotDiv.on('plotly_unhover', onUnhover);
-      console.log('[hover3d] (re)attached to chart');
-    } catch(e) { console.error('[hover3d] attach error:', e); }
+      attachToDiv(plotDiv);
+    } catch(e) { console.error('[hover3d] poll error:', e); }
   }
   setInterval(checkAttach, 500);
 </script>

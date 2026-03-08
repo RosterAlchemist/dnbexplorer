@@ -36,22 +36,24 @@ _DIM_RENAME = {
 
 @st.cache_data(ttl=300)
 def load_data():
-    try:
-        from supabase import create_client
-        url = st.secrets["supabase"]["url"]
-        key = st.secrets["supabase"]["key"]
-        client = create_client(url, key)
-        artists = pd.DataFrame(
-            client.table("artists").select("*").execute().data
-        ).rename(columns=_ARTIST_RENAME)
-        dims = pd.DataFrame(
-            client.table("musical_dimensions").select("*").execute().data
-        ).rename(columns=_DIM_RENAME)
-        return artists, dims
-    except (KeyError, Exception):
-        artists = pd.read_csv('artists.csv')
-        dims = pd.read_csv('dimension_anchors_v2.csv')
-        return artists, dims
+    from supabase import create_client
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    client = create_client(url, key)
+    # Supabase PostgREST caps responses at 1000 rows by default; paginate to get all.
+    _page, _all = 1000, []
+    _offset = 0
+    while True:
+        _batch = client.table("artists").select("*").range(_offset, _offset + _page - 1).execute().data
+        _all.extend(_batch)
+        if len(_batch) < _page:
+            break
+        _offset += _page
+    artists = pd.DataFrame(_all).rename(columns=_ARTIST_RENAME)
+    dims = pd.DataFrame(
+        client.table("musical_dimensions").select("*").execute().data
+    ).rename(columns=_DIM_RENAME)
+    return artists, dims
 
 df, anchors_df = load_data()
 
@@ -130,6 +132,23 @@ subgenre_colors = {
     # Ragga DnB — olive
     'Ragga DnB':          '#556B2F',
 }
+
+COLLISION_EXPAND_CAP = 25  # max artists to show as individual spheres per collision group
+
+def _sphere_positions(n, cx, cy, cz, radius=0.5):
+    """Distribute n points evenly on a sphere (Fibonacci lattice) around (cx, cy, cz)."""
+    if n == 1:
+        return [(cx, cy, cz)]
+    golden_ratio = (1.0 + np.sqrt(5.0)) / 2.0
+    positions = []
+    for i in range(n):
+        theta = 2.0 * np.pi * i / golden_ratio
+        phi   = np.arccos(1.0 - 2.0 * (i + 0.5) / n)
+        x = float(np.clip(cx + radius * np.sin(phi) * np.cos(theta), 1.0, 10.0))
+        y = float(np.clip(cy + radius * np.sin(phi) * np.sin(theta), 1.0, 10.0))
+        z = float(np.clip(cz + radius * np.cos(phi),                1.0, 10.0))
+        positions.append((x, y, z))
+    return positions
 
 # --- 2. HELPERS ---
 def _wrap(text, width=55):
@@ -271,12 +290,13 @@ if cache_key not in st.session_state['cluster_cache']:
         # Explode the subgenres array so each subgenre counts individually
         all_sg = [sg for val in members['Subgenres'] for sg in _ensure_list(val)]
         sg_counts = Counter(all_sg)
+        sorted_sg = sorted(sg_counts.items(), key=lambda x: (-x[1], x[0]))
         cluster_members_map[cid] = {
             'artists': members['Artist'].tolist(),
             'centroid': centroid,
             'count': len(members),
-            'subgenre_counts': dict(sg_counts),
-            'dominant_subgenre': sg_counts.most_common(1)[0][0] if sg_counts else 'Mixed',
+            'subgenre_counts': dict(sorted_sg),
+            'dominant_subgenre': sorted_sg[0][0] if sorted_sg else 'Mixed',
             'outlier_label': outlier_label,
             'centroid_artist': centroid_artist,
         }
@@ -396,18 +416,38 @@ if not f_df.empty:
         )
 
     def build_collision_hover(group):
-        parts = []
-        for _, row in group.iterrows():
-            score_lines = "<br>".join(
-                f"{short:<13} {row[full]:>2}    {DIM_SHORT[i+1][1]:<13} {row[DIM_SHORT[i+1][0]]:>2}"
-                for i, (full, short) in enumerate(DIM_SHORT) if i % 2 == 0
-            )
-            parts.append(
-                f"<b>{row['Artist']}</b><br>"
-                f"<i>{_wrap(row['DNA'], width=45)}</i><br><br>"
-                f"{score_lines}"
-            )
-        return "<br><br>─────────<br><br>".join(parts) + "<extra></extra>"
+        count = len(group)
+        # Full detail view for small collisions (≤3 artists)
+        if count <= 3:
+            parts = []
+            for _, row in group.iterrows():
+                score_lines = "<br>".join(
+                    f"{short:<13} {row[full]:>2}    {DIM_SHORT[i+1][1]:<13} {row[DIM_SHORT[i+1][0]]:>2}"
+                    for i, (full, short) in enumerate(DIM_SHORT) if i % 2 == 0
+                )
+                parts.append(
+                    f"<b>{row['Artist']}</b><br>"
+                    f"<i>{_wrap(row['DNA'], width=45)}</i><br><br>"
+                    f"{score_lines}"
+                )
+            return "<br><br>─────────<br><br>".join(parts) + "<extra></extra>"
+        # Summary view for larger collisions
+        all_sg = [sg for _, row in group.iterrows() for sg in _ensure_list(row.get('Subgenres', []))]
+        sg_counts = Counter(all_sg)
+        top_sg = sg_counts.most_common(4)
+        sg_line = " · ".join(f"{sg} ({n})" for sg, n in top_sg) if top_sg else "—"
+        names = group['Artist'].tolist()
+        if len(names) <= 12:
+            name_block = "<br>".join(names)
+        else:
+            name_block = "<br>".join(names[:12]) + f"<br><i>... +{len(names)-12} more</i>"
+        return (
+            f"<b>{count} artists · same position</b><br>"
+            f"<i>{sg_line}</i><br>"
+            f"────────────<br>"
+            f"{name_block}"
+            "<extra></extra>"
+        )
 
     def axis_color(row):
         def ch(v): return int((v - 1) / 9 * 175 + 80)
@@ -416,11 +456,14 @@ if not f_df.empty:
     f_df = f_df.copy()
     f_df['_color'] = f_df.apply(axis_color, axis=1)
 
-    # Define cluster colors for visualization
+    # 50 hue-only-differentiated colors: evenly spaced around the wheel,
+    # identical saturation (0.88) and lightness (0.58) for visual consistency
+    import colorsys as _cs
     CLUSTER_COLORS = [
-        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
-        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
-        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'
+        '#{:02X}{:02X}{:02X}'.format(
+            *[int(c * 255 + 0.5) for c in _cs.hls_to_rgb(i / 50, 0.58, 0.88)]
+        )
+        for i in range(50)
     ]
 
     fig = go.Figure()
@@ -439,8 +482,32 @@ if not f_df.empty:
 
         is_searched = searched_artist != "None" and searched_artist in member_data['artists'] if searched_artist else False
         is_expanded = cluster_id in expanded_ids
+        # For 25 vibes use odd indices (1,3,5…49) to span the full hue circle;
+        # for 50 vibes use every index sequentially.
+        cluster_color = (CLUSTER_COLORS[(cluster_id * 2 + 1) % 50]
+                         if n_clusters == 25
+                         else CLUSTER_COLORS[cluster_id % 50])
 
-        # ===== CLUSTER CENTROID (always shown) =====
+        # Pre-compute collision positions so we can suppress centroid when it overlaps
+        pos_cols = [axis_x, axis_y, axis_z]
+        collision_positions = set()
+        singles_df = members_df.iloc[0:0]   # empty placeholder
+        collisions_df = members_df.iloc[0:0]
+        if is_expanded or is_searched:
+            is_collision = members_df.duplicated(subset=pos_cols, keep=False)
+            singles_df = members_df[~is_collision]
+            collisions_df = members_df[is_collision]
+            for _, g in collisions_df.groupby(pos_cols, sort=False):
+                collision_positions.add((
+                    int(g[axis_x].iloc[0]),
+                    int(g[axis_y].iloc[0]),
+                    int(g[axis_z].iloc[0]),
+                ))
+
+        centroid_pos = (round(centroid[0]), round(centroid[1]), round(centroid[2]))
+        skip_centroid = centroid_pos in collision_positions
+
+        # ===== CLUSTER CENTROID (suppressed when a collision group occupies same spot) =====
         size = 25 if is_searched else (18 if is_expanded else 12)
         opacity = 1.0 if (is_expanded or is_searched) else 0.5
         border_width = 4 if is_searched else (2 if is_expanded else 1)
@@ -464,35 +531,65 @@ if not f_df.empty:
             "<extra></extra>"
         )
 
-        fig.add_trace(go.Scatter3d(
-            x=[centroid[0]], y=[centroid[1]], z=[centroid[2]],
-            mode='markers+text' if show_labels and (is_expanded or is_searched) else 'markers',
-            text=[f"Vibe {cluster_id+1}"] if show_labels and (is_expanded or is_searched) else [""],
-            customdata=[{"type": "cluster", "cluster_id": cluster_id}],
-            marker=dict(
-                size=size,
-                symbol='diamond',
-                color=CLUSTER_COLORS[cluster_id % len(CLUSTER_COLORS)],
-                opacity=opacity,
-                line=dict(color=border_color, width=border_width)
-            ),
-            textfont=dict(color='white', size=12),
-            textposition="top center",
-            hovertemplate=[hover_centroid],
-            showlegend=False,
-            name=f"Vibe {cluster_id + 1}"
-        ))
+        if not skip_centroid:
+            fig.add_trace(go.Scatter3d(
+                x=[centroid[0]], y=[centroid[1]], z=[centroid[2]],
+                mode='markers+text' if show_labels and (is_expanded or is_searched) else 'markers',
+                text=[f"Vibe {cluster_id+1}"] if show_labels and (is_expanded or is_searched) else [""],
+                customdata=[{"type": "cluster", "cluster_id": cluster_id}],
+                marker=dict(
+                    size=size,
+                    symbol='diamond',
+                    color=cluster_color,
+                    opacity=opacity,
+                    line=dict(color=border_color, width=border_width)
+                ),
+                textfont=dict(color='white', size=12),
+                textposition="top center",
+                hovertemplate=[hover_centroid],
+                showlegend=False,
+                name=f"Vibe {cluster_id + 1}"
+            ))
 
         # ===== CLUSTER MEMBERS (only if expanded or searched) =====
         if is_expanded or is_searched:
-            pos_cols = [axis_x, axis_y, axis_z]
-            is_collision = members_df.duplicated(subset=pos_cols, keep=False)
-            singles_df = members_df[~is_collision]
-            collisions_df = members_df[is_collision]
+            # Connecting lines from centroid to each unique member position
+            cx, cy, cz = centroid[0], centroid[1], centroid[2]
+            seen_line_positions = set()
+            lx, ly, lz = [], [], []
+            for _, row in members_df.iterrows():
+                pos = (row[axis_x], row[axis_y], row[axis_z])
+                if pos not in seen_line_positions:
+                    seen_line_positions.add(pos)
+                    lx += [cx, row[axis_x], None]
+                    ly += [cy, row[axis_y], None]
+                    lz += [cz, row[axis_z], None]
+            if lx:
+                fig.add_trace(go.Scatter3d(
+                    x=lx, y=ly, z=lz,
+                    mode='lines',
+                    line=dict(color=cluster_color, width=2),
+                    opacity=0.35,
+                    hoverinfo='skip',
+                    showlegend=False,
+                ))
+                # Cross marker at the centroid — signals convergence point of the lines
+                fig.add_trace(go.Scatter3d(
+                    x=[centroid[0]], y=[centroid[1]], z=[centroid[2]],
+                    mode='markers',
+                    marker=dict(
+                        size=10,
+                        symbol='cross',
+                        color=cluster_color,
+                        opacity=0.9,
+                        line=dict(color='white', width=1),
+                    ),
+                    hoverinfo='skip',
+                    showlegend=False,
+                ))
 
             # Individual artist spheres
             if not singles_df.empty:
-                cluster_color = CLUSTER_COLORS[cluster_id % len(CLUSTER_COLORS)]
                 colors = [cluster_color] * len(singles_df)
 
                 fig.add_trace(go.Scatter3d(
@@ -517,27 +614,74 @@ if not f_df.empty:
 
             # Collision points (multiple artists at same position)
             for _, group in collisions_df.groupby(pos_cols, sort=False):
-                collision_names = " & ".join(group['Artist'].tolist())
+                count = len(group)
+                cx = float(group[axis_x].iloc[0])
+                cy = float(group[axis_y].iloc[0])
+                cz = float(group[axis_z].iloc[0])
 
-                fig.add_trace(go.Scatter3d(
-                    x=[group[axis_x].iloc[0]],
-                    y=[group[axis_y].iloc[0]],
-                    z=[group[axis_z].iloc[0]],
-                    mode='markers+text' if show_labels else 'markers',
-                    text=[collision_names] if show_labels else [""],
-                    customdata=[{"type": "collision", "cluster_id": cluster_id}],
-                    marker=dict(
-                        size=10,
-                        symbol='diamond',
-                        color='#FFD700',
-                        opacity=0.95,
-                        line=dict(color='white', width=2)
-                    ),
-                    textfont=dict(color='#FFD700', size=11),
-                    textposition="top center",
-                    hovertemplate=[build_collision_hover(group)],
-                    showlegend=False
-                ))
+                if count > COLLISION_EXPAND_CAP:
+                    # Too many to expand — show summary circle
+                    marker_size = min(8 + count, 24)
+                    fig.add_trace(go.Scatter3d(
+                        x=[cx], y=[cy], z=[cz],
+                        mode='markers+text' if show_labels else 'markers',
+                        text=[f"×{count}"] if show_labels else [""],
+                        customdata=[{"type": "collision", "cluster_id": cluster_id}],
+                        marker=dict(
+                            size=marker_size, symbol='circle',
+                            color=cluster_color, opacity=0.95,
+                            line=dict(color='white', width=2)
+                        ),
+                        textfont=dict(color='white', size=11),
+                        textposition="top center",
+                        hovertemplate=[build_collision_hover(group)],
+                        showlegend=False
+                    ))
+                else:
+                    # Expand: distribute artists on a sphere around the collision centre
+                    radius = 0.3 + count * 0.015  # 0.33 for 2 artists → 0.67 for 25
+                    disp = _sphere_positions(count, cx, cy, cz, radius)
+                    rows = list(group.iterrows())
+
+                    # Lines from collision centre to each distributed artist
+                    lx, ly, lz = [], [], []
+                    for (x, y, z) in disp:
+                        lx += [cx, x, None]
+                        ly += [cy, y, None]
+                        lz += [cz, z, None]
+                    fig.add_trace(go.Scatter3d(
+                        x=lx, y=ly, z=lz, mode='lines',
+                        line=dict(color=cluster_color, width=1),
+                        opacity=0.3, hoverinfo='skip', showlegend=False,
+                    ))
+
+                    # Cross at collision centre (convergence point)
+                    fig.add_trace(go.Scatter3d(
+                        x=[cx], y=[cy], z=[cz], mode='markers',
+                        marker=dict(
+                            size=8, symbol='cross', color=cluster_color,
+                            opacity=0.85, line=dict(color='white', width=1)
+                        ),
+                        hovertemplate=[build_collision_hover(group)],
+                        showlegend=False,
+                    ))
+
+                    # Individual artist spheres at distributed positions
+                    fig.add_trace(go.Scatter3d(
+                        x=[p[0] for p in disp],
+                        y=[p[1] for p in disp],
+                        z=[p[2] for p in disp],
+                        mode='markers+text' if show_labels else 'markers',
+                        text=[row['Artist'] for _, row in rows] if show_labels else [],
+                        marker=dict(
+                            size=7, symbol='circle', color=cluster_color,
+                            opacity=0.9, line=dict(color='white', width=1)
+                        ),
+                        textfont=dict(color='white', size=9),
+                        textposition="top center",
+                        hovertemplate=[build_hover(row) for _, row in rows],
+                        showlegend=False,
+                    ))
 
     # Grid lines
     grid_style = dict(color="rgba(150, 150, 150, 0.1)", width=1)
@@ -566,6 +710,7 @@ if not f_df.empty:
 
     fig.update_layout(
         template="plotly_dark", height=800,
+        uirevision="polyjamerous_3d",
         paper_bgcolor='rgba(0,0,0,0)',
         hoverlabel=dict(font=dict(family="monospace", size=12)),
         clickmode='event+select',

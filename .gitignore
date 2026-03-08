@@ -13,3 +13,7 @@ Thumbs.db
 
 # Claude Code temp files
 tmpclaude-*
+
+# Node
+node_modules/
+package-lock.json
